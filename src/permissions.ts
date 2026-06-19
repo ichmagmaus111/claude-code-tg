@@ -7,6 +7,7 @@ import { summarizeToolUse, sendHtml, sendRichMarkdown } from './render.js';
 import { tg, escapeHtml, btn, kb, type PremiumButton } from './emoji.js';
 import { S } from './i18n.js';
 import type { SettingsStore } from './settings.js';
+import { scopeFromContext, targetFromScope, withReplyTarget, type ChatScope } from './telegram.js';
 
 export interface PermissionRequest {
   toolName: string;
@@ -21,6 +22,7 @@ export type PermissionPrompter = (req: PermissionRequest) => Promise<PermissionR
 
 interface Pending {
   resolve: (r: PermissionResult) => void;
+  scopeKey: string;
   suggestions?: PermissionUpdate[];
   timer: ReturnType<typeof setTimeout>;
 }
@@ -52,16 +54,17 @@ export class PermissionManager {
     this.registerCallbacks();
   }
 
-  createPrompter(chatId: number): PermissionPrompter {
-    return (req) => this.prompt(chatId, req);
+  createPrompter(scope: ChatScope): PermissionPrompter {
+    return (req) => this.prompt(scope, req);
   }
 
-  private async prompt(chatId: number, req: PermissionRequest): Promise<PermissionResult> {
+  private async prompt(scope: ChatScope, req: PermissionRequest): Promise<PermissionResult> {
     if (req.toolName === 'ExitPlanMode') {
-      return this.promptPlan(chatId, req);
+      return this.promptPlan(scope, req);
     }
 
-    const s = S(this.settings.lang(chatId));
+    const target = targetFromScope(scope);
+    const s = S(this.settings.lang(scope));
     const id = String(++this.counter);
     const hasSuggestions = !!req.suggestions?.length;
 
@@ -76,31 +79,36 @@ export class PermissionManager {
     if (req.description) lines.push(escapeHtml(req.description));
     lines.push('', s.permTool(req.toolName));
 
-    await this.bot.api.sendMessage(chatId, lines.join('\n'), {
-      parse_mode: 'HTML',
-      reply_markup: kb([row]),
-    });
+    await this.bot.api.sendMessage(
+      target.chatId,
+      lines.join('\n'),
+      withReplyTarget(target, {
+        parse_mode: 'HTML' as const,
+        reply_markup: kb([row]),
+      }),
+    );
 
     return new Promise<PermissionResult>((resolve) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         resolve({ behavior: 'deny', message: s.permTimeout });
       }, TIMEOUT_MS);
-      this.pending.set(id, { resolve, suggestions: req.suggestions, timer });
+      this.pending.set(id, { resolve, scopeKey: scope.key, suggestions: req.suggestions, timer });
     });
   }
 
   /** Поток подтверждения плана: рендер + .md-файл + кнопки Принять / Отклонить. */
-  private async promptPlan(chatId: number, req: PermissionRequest): Promise<PermissionResult> {
-    const s = S(this.settings.lang(chatId));
+  private async promptPlan(scope: ChatScope, req: PermissionRequest): Promise<PermissionResult> {
+    const target = targetFromScope(scope);
+    const s = S(this.settings.lang(scope));
     const id = String(++this.counter);
     const plan =
       typeof req.input.plan === 'string' && req.input.plan.trim()
         ? (req.input.plan as string)
         : req.title || 'План';
 
-    await sendHtml(this.bot.api, chatId, `${tg('pencil')} <b>${s.planTitle}</b>`);
-    await sendRichMarkdown(this.token, chatId, plan); // рендер плана (best-effort)
+    await sendHtml(this.bot.api, target, `${tg('pencil')} <b>${s.planTitle}</b>`);
+    await sendRichMarkdown(this.token, target, plan); // рендер плана (best-effort)
 
     const buttons = kb([
       [
@@ -109,24 +117,29 @@ export class PermissionManager {
       ],
     ]);
     // .md-файл с полным планом + кнопки на нём
-    await this.bot.api.sendDocument(chatId, new InputFile(Buffer.from(plan, 'utf8'), 'plan.md'), {
-      caption: s.planFileCaption,
-      reply_markup: buttons,
-    });
+    await this.bot.api.sendDocument(
+      target.chatId,
+      new InputFile(Buffer.from(plan, 'utf8'), 'plan.md'),
+      withReplyTarget(target, {
+        caption: s.planFileCaption,
+        reply_markup: buttons,
+      }),
+    );
 
     return new Promise<PermissionResult>((resolve) => {
       const timer = setTimeout(() => {
         this.planPending.delete(id);
         resolve({ behavior: 'deny', message: s.permTimeout });
       }, TIMEOUT_MS);
-      this.planPending.set(id, { resolve, timer });
+      this.planPending.set(id, { resolve, scopeKey: scope.key, timer });
     });
   }
 
   private registerCallbacks(): void {
     // обычные разрешения
     this.bot.callbackQuery(/^perm:(\d+):(allow|always|deny)$/, async (ctx) => {
-      const s = S(this.settings.lang(ctx.chat?.id ?? 0));
+      const scope = scopeFromContext(ctx);
+      const s = scope ? S(this.settings.lang(scope)) : S('ru');
       const id = ctx.match[1];
       const action = ctx.match[2];
       const entry = this.pending.get(id);
@@ -162,7 +175,7 @@ export class PermissionManager {
       entry.resolve(result);
       await ctx.answerCallbackQuery({ text: toast });
       try {
-        await ctx.editMessageText(html, { parse_mode: 'HTML' });
+        await ctx.editMessageText(html, { parse_mode: 'HTML' as const });
       } catch {
         try {
           await ctx.editMessageReplyMarkup();
@@ -174,7 +187,9 @@ export class PermissionManager {
 
     // подтверждение плана
     this.bot.callbackQuery(/^plan:(\d+):(ok|no)$/, async (ctx) => {
-      const s = S(this.settings.lang(ctx.chat?.id ?? 0));
+      const scope = scopeFromContext(ctx);
+      const target = scope ? targetFromScope(scope) : undefined;
+      const s = scope ? S(this.settings.lang(scope)) : S('ru');
       const id = ctx.match[1];
       const ok = ctx.match[2] === 'ok';
       const entry = this.planPending.get(id);
@@ -194,11 +209,11 @@ export class PermissionManager {
         // разрешаем ExitPlanMode и переключаем сессию в acceptEdits
         entry.resolve({ behavior: 'allow', updatedPermissions: [EXIT_PLAN_TO_ACCEPT] });
         await ctx.answerCallbackQuery({ text: s.btnApprovePlan });
-        await sendHtml(this.bot.api, ctx.chat?.id ?? 0, s.planApproved);
+        if (target) await sendHtml(this.bot.api, target, s.planApproved);
       } else {
         entry.resolve({ behavior: 'deny', message: s.planDenyReason });
         await ctx.answerCallbackQuery({ text: s.btnRejectPlan });
-        await sendHtml(this.bot.api, ctx.chat?.id ?? 0, s.planRejected);
+        if (target) await sendHtml(this.bot.api, target, s.planRejected);
       }
       try {
         await ctx.editMessageReplyMarkup(); // убираем кнопки с .md-сообщения
@@ -209,13 +224,16 @@ export class PermissionManager {
   }
 
   /** Сбрасывает все ожидающие запросы как deny (например при /new или завершении сессии). */
-  rejectAll(reason: string): void {
+  rejectAll(reason: string, scopeKey?: string): void {
     for (const map of [this.pending, this.planPending]) {
       for (const [, entry] of map) {
+        if (scopeKey && entry.scopeKey !== scopeKey) continue;
         clearTimeout(entry.timer);
         entry.resolve({ behavior: 'deny', message: reason });
       }
-      map.clear();
+      for (const [id, entry] of map) {
+        if (!scopeKey || entry.scopeKey === scopeKey) map.delete(id);
+      }
     }
   }
 }

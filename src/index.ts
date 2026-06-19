@@ -61,6 +61,7 @@ async function main(): Promise<void> {
   process.once('SIGTERM', () => void shutdown('SIGTERM'));
 
   console.log('🤖 Запускаю Telegram-бота Claude Code…');
+  console.log('   Сборка: threaded-mode');
   console.log(`   Каталог проекта: ${config.workingDir}`);
   console.log(`   Разрешённых пользователей: ${config.allowedUserIds.size}`);
   console.log(`   Режим по умолчанию: ${config.defaultMode}`);

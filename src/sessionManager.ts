@@ -16,13 +16,15 @@ import {
 import { tg, escapeHtml } from './emoji.js';
 import { S } from './i18n.js';
 import type { SettingsStore } from './settings.js';
+import { targetFromScope, type ChatScope, type TelegramTarget } from './telegram.js';
 
 const STORE_FILE = join(process.cwd(), '.claude-bot-sessions.json');
 
-/** Создаёт и переиспользует сессии Claude по chatId, рендерит их вывод в Telegram. */
+/** Создаёт и переиспользует сессии Claude по чату/topic, рендерит их вывод в Telegram. */
 export class SessionManager {
-  private sessions = new Map<number, ClaudeSession>();
-  private lastSessionId = new Map<number, string>();
+  private sessions = new Map<string, ClaudeSession>();
+  private lastSessionId = new Map<string, string>();
+  private targets = new Map<string, TelegramTarget>();
 
   constructor(
     private readonly bot: Bot,
@@ -33,38 +35,41 @@ export class SessionManager {
     this.loadStore();
   }
 
-  /** Возвращает активную сессию чата, создавая новую при отсутствии. */
-  get(chatId: number): ClaudeSession {
-    let session = this.sessions.get(chatId);
+  /** Возвращает активную сессию scope, создавая новую при отсутствии. */
+  get(scope: ChatScope): ClaudeSession {
+    this.targets.set(scope.key, targetFromScope(scope));
+    let session = this.sessions.get(scope.key);
     if (!session) {
-      session = this.create(chatId);
-      this.sessions.set(chatId, session);
+      session = this.create(scope);
+      this.sessions.set(scope.key, session);
     }
     return session;
   }
 
-  has(chatId: number): boolean {
-    return this.sessions.has(chatId);
+  has(scope: ChatScope): boolean {
+    return this.sessions.has(scope.key);
   }
 
   /** Завершает текущую сессию и создаёт свежую (для /new, /clear, /resume). */
-  async reset(chatId: number, resume?: string, cwd?: string): Promise<ClaudeSession> {
-    const existing = this.sessions.get(chatId);
+  async reset(scope: ChatScope, resume?: string, cwd?: string): Promise<ClaudeSession> {
+    this.targets.set(scope.key, targetFromScope(scope));
+    const existing = this.sessions.get(scope.key);
     if (existing) {
-      this.permissions.rejectAll(S(this.settings.lang(chatId)).sessionRestarted);
+      this.permissions.rejectAll(S(this.settings.lang(scope)).sessionRestarted, scope.key);
       await existing.close();
     }
-    const session = this.create(chatId, resume, cwd);
-    this.sessions.set(chatId, session);
+    const session = this.create(scope, resume, cwd);
+    this.sessions.set(scope.key, session);
     return session;
   }
 
-  getLastSessionId(chatId: number): string | undefined {
-    return this.lastSessionId.get(chatId);
+  getLastSessionId(scope: ChatScope): string | undefined {
+    return this.lastSessionId.get(scope.key);
   }
 
-  private create(chatId: number, resume?: string, cwd?: string): ClaudeSession {
+  private create(scope: ChatScope, resume?: string, cwd?: string): ClaudeSession {
     const token = this.config.botToken;
+    const target = (): TelegramTarget => this.targets.get(scope.key) ?? targetFromScope(scope);
     // Состояние стриминга черновика (живёт в рамках одной сессии чата).
     let draftId = 1; // draft_id должен быть ненулевым; растёт по сообщениям
     let lastDraftAt = 0;
@@ -78,7 +83,7 @@ export class SessionManager {
         if (draftInFlight || now - lastDraftAt < DRAFT_THROTTLE_MS) return;
         lastDraftAt = now;
         draftInFlight = true;
-        void sendRichDraft(token, chatId, draftId, accumulated).finally(() => {
+        void sendRichDraft(token, target(), draftId, accumulated).finally(() => {
           draftInFlight = false;
         });
       },
@@ -86,10 +91,10 @@ export class SessionManager {
         // Финал: персистим настоящий ответ (черновик эфемерный).
         // Ответ Claude — markdown → Rich Message (Bot API 10.1); иначе plain-текст.
         if (text.trim().length <= RICH_MAX) {
-          const ok = await sendRichMarkdown(token, chatId, text);
-          if (!ok) await sendChunked(this.bot.api, chatId, text);
+          const ok = await sendRichMarkdown(token, target(), text);
+          if (!ok) await sendChunked(this.bot.api, target(), text);
         } else {
-          await sendChunked(this.bot.api, chatId, text);
+          await sendChunked(this.bot.api, target(), text);
         }
         // Следующее сообщение — новый черновик.
         draftId += 1;
@@ -98,41 +103,41 @@ export class SessionManager {
       onToolUse: async (name, input) => {
         await sendHtml(
           this.bot.api,
-          chatId,
+          target(),
           `${tg('code')} ${escapeHtml(summarizeToolUse(name, input))}`,
         );
       },
       onInit: async ({ sessionId, model, mode }) => {
         // Тихо запоминаем сессию — без баннера в чат (его видно по /status).
-        this.lastSessionId.set(chatId, sessionId);
+        this.lastSessionId.set(scope.key, sessionId);
         this.saveStore();
-        console.log(`[chat ${chatId}] сессия ${sessionId} (${model}, ${mode})`);
+        console.log(`[scope ${scope.key}] сессия ${sessionId} (${model}, ${mode})`);
       },
       onResult: async (result) => {
         if (result.session_id) {
-          this.lastSessionId.set(chatId, result.session_id);
+          this.lastSessionId.set(scope.key, result.session_id);
           this.saveStore();
         }
         // На успехе ничего не шлём — пользователь видит сам ответ агента.
         if (result.subtype !== 'success') {
           await sendHtml(
             this.bot.api,
-            chatId,
-            S(this.settings.lang(chatId)).turnError(result.subtype),
+            target(),
+            S(this.settings.lang(scope)).turnError(result.subtype),
           );
         }
       },
       onError: async (message) => {
-        await sendHtml(this.bot.api, chatId, `${tg('cross')} ${escapeHtml(message)}`);
+        await sendHtml(this.bot.api, target(), `${tg('cross')} ${escapeHtml(message)}`);
       },
     };
 
     // приоритет рабочей папки: явная (resume) > выбранная через /cd > из конфига
-    const effectiveCwd = cwd ?? this.settings.getCwd(chatId);
+    const effectiveCwd = cwd ?? this.settings.getCwd(scope);
 
     return new ClaudeSession({
       config: this.config,
-      prompter: this.permissions.createPrompter(chatId),
+      prompter: this.permissions.createPrompter(scope),
       callbacks,
       resume,
       cwd: effectiveCwd,
@@ -141,13 +146,13 @@ export class SessionManager {
   }
 
   /** Меняет рабочую папку чата (/cd) и стартует свежую сессию в ней. */
-  async setProjectDir(chatId: number, dir: string): Promise<void> {
-    this.settings.setCwd(chatId, dir);
-    await this.reset(chatId);
+  async setProjectDir(scope: ChatScope, dir: string): Promise<void> {
+    this.settings.setCwd(scope, dir);
+    await this.reset(scope);
   }
 
-  setMode(chatId: number, mode: PermissionMode): Promise<void> {
-    return this.get(chatId).setMode(mode);
+  setMode(scope: ChatScope, mode: PermissionMode): Promise<void> {
+    return this.get(scope).setMode(mode);
   }
 
   async closeAll(): Promise<void> {
@@ -161,8 +166,8 @@ export class SessionManager {
     try {
       const raw = readFileSync(STORE_FILE, 'utf8');
       const data = JSON.parse(raw) as Record<string, string>;
-      for (const [chatId, sessionId] of Object.entries(data)) {
-        this.lastSessionId.set(Number(chatId), sessionId);
+      for (const [key, sessionId] of Object.entries(data)) {
+        this.lastSessionId.set(key, sessionId);
       }
     } catch {
       /* файла ещё нет — это нормально */
@@ -171,8 +176,8 @@ export class SessionManager {
 
   private saveStore(): void {
     const data: Record<string, string> = {};
-    for (const [chatId, sessionId] of this.lastSessionId) {
-      data[chatId] = sessionId;
+    for (const [key, sessionId] of this.lastSessionId) {
+      data[key] = sessionId;
     }
     try {
       writeFileSync(STORE_FILE, JSON.stringify(data, null, 2));

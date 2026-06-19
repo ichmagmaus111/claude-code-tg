@@ -25,6 +25,8 @@
   каждый запрос на запись/Bash прилетает кнопками Разрешить / Всегда / Отклонить.
 - Выбор и возобновление сессий по всем проектам (`/resume`, `/sessions`),
   с возобновлением в родной рабочей папке каждой сессии.
+- Threaded mode / topics в Telegram-группах. У каждого topic своя Claude-сессия,
+  выбранный проект и поток ответов; обычные личные чаты работают как раньше.
 - Фото и картинки-файлы. Claude мультимодальный и видит присланные изображения.
 - Богатые ответы. Markdown от Claude рендерится нативно (заголовки, код-блоки,
   списки, таблицы, цитаты) через Rich Messages из Telegram Bot API 10.1, до
@@ -44,9 +46,10 @@ Telegram  -->  grammY  -->  ClaudeSession (streaming input)  -->  query() из A
                  +---- inline-кнопки Разрешить/Отклонить <--+ canUseTool (запрос разрешения)
 ```
 
-Одна долгоживущая сессия Claude на каждый Telegram-чат. Сообщения уходят в
-Claude по мере поступления; ответы стримятся обратно. Запросы разрешений
-(`canUseTool`) превращаются в inline-кнопки.
+Одна долгоживущая сессия Claude на каждый Telegram-чат или topic в threaded
+mode. Сообщения уходят в Claude по мере поступления; ответы стримятся обратно в
+тот же чат/topic. Запросы разрешений (`canUseTool`) превращаются в
+inline-кнопки.
 
 ## Требования
 
@@ -132,9 +135,17 @@ DEFAULT_PERMISSION_MODE=default
 ### Первый запуск и язык
 
 При первом обращении бот сначала просит выбрать язык (английский или русский).
-Выбор сохраняется по чату в `.claude-bot-settings.json` и меняется в любой
-момент через `/config`. Локализуются собственные сообщения бота; ответы Claude
-приходят на том языке, на котором отвечает Claude.
+Выбор сохраняется по чату/topic в `.claude-bot-settings.json` и меняется в
+любой момент через `/config`. Локализуются собственные сообщения бота; ответы
+Claude приходят на том языке, на котором отвечает Claude.
+
+### Threaded mode в Telegram
+
+Чтобы использовать отдельные topic-сессии в группе, включи threaded mode для
+бота в BotFather (`Bot Settings -> Threaded mode`) и добавь бота в группу с
+topics. Бот автоматически видит `message_thread_id`, хранит отдельную сессию
+Claude для каждого topic и отправляет все ответы, rich messages, черновики,
+файлы с планами и запросы разрешений обратно в тот же topic.
 
 ## Запуск
 
@@ -263,6 +274,9 @@ user IDs.
   write/Bash request arrives as Allow / Always / Deny buttons.
 - Session selection and resume across all projects (`/resume`, `/sessions`),
   resuming in each session's own working directory.
+- Telegram group threaded mode / topics. Each topic gets its own Claude
+  session, selected project, and reply stream; regular private chats keep the
+  existing behavior.
 - Photos and image files. Claude is multimodal and sees the images you send.
 - Rich replies. Claude's Markdown output is rendered natively (headings, code
   blocks, lists, tables, quotes) using Telegram Bot API 10.1 Rich Messages, up
@@ -281,9 +295,9 @@ Telegram  -->  grammY  -->  ClaudeSession (streaming input)  -->  query() from t
                  +---- inline Allow / Deny buttons <--+ canUseTool (permission request)
 ```
 
-One long-lived Claude session per Telegram chat. Messages are fed to Claude as
-they arrive; replies stream back. Permission requests (`canUseTool`) become
-inline buttons.
+One long-lived Claude session per Telegram chat or threaded-mode topic.
+Messages are fed to Claude as they arrive; replies stream back to the same
+chat/topic. Permission requests (`canUseTool`) become inline buttons.
 
 ## Requirements
 
@@ -370,10 +384,18 @@ See [`.env.example`](.env.example) for the full template.
 ### First launch and language
 
 The first time a user interacts with the bot it asks them to pick a language
-(English or Russian) before anything else. The choice is stored per chat in
-`.claude-bot-settings.json` and can be changed any time via `/config`. The
+(English or Russian) before anything else. The choice is stored per chat/topic
+in `.claude-bot-settings.json` and can be changed any time via `/config`. The
 bot's own messages are localized; Claude's replies come in whatever language
 Claude responds with.
+
+### Telegram threaded mode
+
+To use isolated topic sessions in a group, enable threaded mode for the bot in
+BotFather (`Bot Settings -> Threaded mode`) and add the bot to a group with
+topics. The bot automatically reads `message_thread_id`, keeps a separate
+Claude session for each topic, and sends replies, rich messages, drafts, plan
+files, and permission prompts back to the same topic.
 
 ## Running
 

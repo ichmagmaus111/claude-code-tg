@@ -1,4 +1,10 @@
 import type { Api } from 'grammy';
+import {
+  richDraftPayload,
+  richPayload,
+  type TelegramTarget,
+  withReplyTarget,
+} from './telegram.js';
 
 const TELEGRAM_MAX = 4096;
 const CHUNK = 3800; // запас под префиксы/эмодзи
@@ -25,13 +31,17 @@ export function chunkText(text: string, size = CHUNK): string[] {
  */
 export async function sendChunked(
   api: Api,
-  chatId: number,
+  target: TelegramTarget,
   text: string,
 ): Promise<void> {
   const trimmed = text.trim();
   if (!trimmed) return;
   for (const part of chunkText(trimmed)) {
-    await api.sendMessage(chatId, part, { link_preview_options: { is_disabled: true } });
+    await api.sendMessage(
+      target.chatId,
+      part,
+      withReplyTarget(target, { link_preview_options: { is_disabled: true } }),
+    );
   }
 }
 
@@ -43,7 +53,7 @@ export async function sendChunked(
  */
 export async function sendHtml(
   api: Api,
-  chatId: number,
+  target: TelegramTarget,
   html: string,
 ): Promise<void> {
   const trimmed = html.trim();
@@ -51,10 +61,14 @@ export async function sendHtml(
   const parts =
     trimmed.length <= TELEGRAM_MAX ? [trimmed] : splitByLines(trimmed, CHUNK);
   for (const part of parts) {
-    await api.sendMessage(chatId, part, {
-      parse_mode: 'HTML',
-      link_preview_options: { is_disabled: true },
-    });
+    await api.sendMessage(
+      target.chatId,
+      part,
+      withReplyTarget(target, {
+        parse_mode: 'HTML' as const,
+        link_preview_options: { is_disabled: true },
+      }),
+    );
   }
 }
 
@@ -83,7 +97,7 @@ export const RICH_MAX = 32000;
  */
 export async function sendRichMarkdown(
   token: string,
-  chatId: number,
+  target: TelegramTarget,
   markdown: string,
 ): Promise<boolean> {
   const trimmed = markdown.trim();
@@ -92,7 +106,7 @@ export async function sendRichMarkdown(
     const res = await fetch(`https://api.telegram.org/bot${token}/sendRichMessage`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, rich_message: { markdown: trimmed } }),
+      body: JSON.stringify({ ...richPayload(target), rich_message: { markdown: trimmed } }),
     });
     const data = (await res.json()) as { ok?: boolean };
     return data.ok === true;
@@ -107,7 +121,7 @@ export async function sendRichMarkdown(
  */
 export async function sendRichDraft(
   token: string,
-  chatId: number,
+  target: TelegramTarget,
   draftId: number,
   markdown: string,
 ): Promise<boolean> {
@@ -117,7 +131,11 @@ export async function sendRichDraft(
     const res = await fetch(`https://api.telegram.org/bot${token}/sendRichMessageDraft`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, draft_id: draftId, rich_message: { markdown: trimmed } }),
+      body: JSON.stringify({
+        ...richDraftPayload(target),
+        draft_id: draftId,
+        rich_message: { markdown: trimmed },
+      }),
       signal: AbortSignal.timeout(5000),
     });
     const data = (await res.json()) as { ok?: boolean };
