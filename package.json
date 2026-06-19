@@ -1,0 +1,58 @@
+{
+  "name": "claude-code-tg",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Control Claude Code from Telegram: native slash commands, permission modes, sessions, photos, streaming rich replies, whitelist access.",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "telegram",
+    "telegram-bot",
+    "anthropic",
+    "ai",
+    "grammy",
+    "agent-sdk"
+  ],
+  "license": "MIT",
+  "author": "ichmagmaus111",
+  "homepage": "https://github.com/ichmagmaus111/claude-code-tg#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ichmagmaus111/claude-code-tg.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ichmagmaus111/claude-code-tg/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "claude-code-tg": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "src",
+    "tsconfig.json",
+    ".env.example",
+    "README.md"
+  ],
+  "preferGlobal": true,
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepare": "npm run build"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "latest",
+    "dotenv": "^16.4.5",
+    "grammy": "^1.30.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}
