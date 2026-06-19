@@ -16,6 +16,13 @@ import { SettingsStore } from './settings.js';
 import { sendChunked, sendHtml } from './render.js';
 import { tg, escapeHtml, btn, kb, type PremiumButton } from './emoji.js';
 import { S, type Lang } from './i18n.js';
+import {
+  scopeFromContext,
+  targetFromScope,
+  withReplyTarget,
+  withThread,
+  type ChatScope,
+} from './telegram.js';
 
 function fmtDate(ms: number): string {
   const d = new Date(ms);
@@ -58,12 +65,11 @@ export function buildBot(config: Config): BuiltBot {
   const settings = new SettingsStore();
   const permissions = new PermissionManager(bot, settings, config.botToken);
   const sessions = new SessionManager(bot, config, permissions, settings);
-  // кандидаты для /cd: chatId -> список путей (для коротких callback_data)
-  const cdCandidates = new Map<number, string[]>();
+  // кандидаты для /cd: scope-key -> список путей (для коротких callback_data)
+  const cdCandidates = new Map<string, string[]>();
 
-  const chatId = (ctx: Context): number | undefined => ctx.chat?.id ?? ctx.from?.id;
   /** Строки на языке чата. */
-  const t = (id: number) => S(settings.lang(id));
+  const t = (scope: ChatScope) => S(settings.lang(scope));
 
   // Скачивает медиа текущего сообщения из Telegram и кодирует в base64.
   const downloadBase64 = async (ctx: Context): Promise<string> => {
@@ -76,43 +82,58 @@ export function buildBot(config: Config): BuiltBot {
   };
 
   const guard =
-    (handler: (ctx: Context, id: number) => Promise<void>) =>
+    (handler: (ctx: Context, scope: ChatScope) => Promise<void>) =>
     async (ctx: Context) => {
-      const id = chatId(ctx);
-      if (id === undefined) return;
+      const scope = scopeFromContext(ctx);
+      if (!scope) return;
       try {
-        await handler(ctx, id);
+        await handler(ctx, scope);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        await sendHtml(bot.api, id, `${tg('cross')} ${escapeHtml(msg)}`);
+        await sendHtml(bot.api, targetFromScope(scope), `${tg('cross')} ${escapeHtml(msg)}`);
       }
     };
 
   // ----- переиспользуемые панели (для /config и команд) -----
-  const sendLanguageChooser = async (id: number) => {
-    await bot.api.sendMessage(id, t(id).chooseLanguage, {
-      parse_mode: 'HTML',
-      reply_markup: kb([[btn('Русский', 'lang:ru'), btn('English', 'lang:en')]]),
-    });
+  const sendLanguageChooser = async (scope: ChatScope) => {
+    const target = targetFromScope(scope);
+    await bot.api.sendMessage(
+      target.chatId,
+      t(scope).chooseLanguage,
+      withReplyTarget(target, {
+        parse_mode: 'HTML' as const,
+        reply_markup: kb([[btn('Русский', 'lang:ru'), btn('English', 'lang:en')]]),
+      }),
+    );
   };
 
-  const showModeChooser = async (id: number) => {
-    const s = t(id);
+  const showModeChooser = async (scope: ChatScope) => {
+    const target = targetFromScope(scope);
+    const s = t(scope);
     const rows: PremiumButton[][] = PERMISSION_MODES.map((m) => [
       btn(`${m} (${s.modeDesc[m] ?? ''})`, `mode:${m}`, 'settings'),
     ]);
-    await bot.api.sendMessage(id, s.chooseMode, { parse_mode: 'HTML', reply_markup: kb(rows) });
+    await bot.api.sendMessage(
+      target.chatId,
+      s.chooseMode,
+      withReplyTarget(target, { parse_mode: 'HTML' as const, reply_markup: kb(rows) }),
+    );
   };
 
-  const showModelChooser = async (id: number) => {
-    const s = t(id);
-    const models = await sessions.get(id).listModels();
+  const showModelChooser = async (scope: ChatScope) => {
+    const target = targetFromScope(scope);
+    const s = t(scope);
+    const models = await sessions.get(scope).listModels();
     if (models.length === 0) {
-      await sendHtml(bot.api, id, s.modelsUnavailable);
+      await sendHtml(bot.api, target, s.modelsUnavailable);
       return;
     }
     const rows: PremiumButton[][] = models.map((m) => [btn(m.displayName, `model:${m.value}`, 'brush')]);
-    await bot.api.sendMessage(id, s.chooseModel, { parse_mode: 'HTML', reply_markup: kb(rows) });
+    await bot.api.sendMessage(
+      target.chatId,
+      s.chooseModel,
+      withReplyTarget(target, { parse_mode: 'HTML' as const, reply_markup: kb(rows) }),
+    );
   };
 
   // --- AUTH: пускаем только whitelisted Telegram ID ---
@@ -123,84 +144,97 @@ export function buildBot(config: Config): BuiltBot {
     }
     if (ctx.callbackQuery) {
       await ctx.answerCallbackQuery({ text: 'Доступ запрещён / Access denied' });
-    } else if (ctx.chat) {
-      await sendHtml(bot.api, ctx.chat.id, t(ctx.chat.id).accessDenied(String(userId ?? '—')));
+    } else {
+      const scope = scopeFromContext(ctx);
+      if (scope) {
+        await sendHtml(
+          bot.api,
+          targetFromScope(scope),
+          t(scope).accessDenied(String(userId ?? '—')),
+        );
+      }
     }
   });
 
   // --- FIRST-RUN: при первом входе требуем выбрать язык ---
   bot.use(async (ctx, next) => {
-    const id = chatId(ctx);
-    if (id === undefined) return next();
+    const scope = scopeFromContext(ctx);
+    if (!scope) return next();
     if (ctx.callbackQuery?.data?.startsWith('lang:')) return next(); // сам выбор пропускаем
-    if (settings.hasLang(id)) return next();
-    await sendLanguageChooser(id);
+    if (settings.hasLang(scope)) return next();
+    await sendLanguageChooser(scope);
     // дальше не пускаем — сперва язык
   });
 
   // --- Выбор языка ---
-  bot.callbackQuery(/^lang:(ru|en)$/, guard(async (ctx, id) => {
+  bot.callbackQuery(/^lang:(ru|en)$/, guard(async (ctx, scope) => {
     const lang = ctx.match![1] as Lang;
-    settings.setLang(id, lang);
+    settings.setLang(scope, lang);
     const s = S(lang);
     await ctx.answerCallbackQuery({ text: s.langName });
     try {
-      await ctx.editMessageText(s.languageSet, { parse_mode: 'HTML' });
+      await ctx.editMessageText(s.languageSet, { parse_mode: 'HTML' as const });
     } catch {
       /* нечего редактировать */
     }
-    await sendHtml(bot.api, id, s.help);
+    await sendHtml(bot.api, targetFromScope(scope), s.help);
   }));
 
   // --- Справка ---
-  bot.command(['start', 'help'], guard(async (ctx, id) => {
-    await sendHtml(bot.api, id, t(id).help);
+  bot.command(['start', 'help'], guard(async (ctx, scope) => {
+    await sendHtml(bot.api, targetFromScope(scope), t(scope).help);
   }));
 
-  bot.command('id', guard(async (ctx, id) => {
-    await sendHtml(bot.api, id, t(id).yourId(String(ctx.from?.id)));
+  bot.command('id', guard(async (ctx, scope) => {
+    await sendHtml(bot.api, targetFromScope(scope), t(scope).yourId(String(ctx.from?.id)));
   }));
 
   // --- Настройки ---
-  bot.command('config', guard(async (ctx, id) => {
-    const s = t(id);
-    await bot.api.sendMessage(id, s.configTitle, {
-      parse_mode: 'HTML',
-      reply_markup: kb([
-        [btn(s.btnLanguage, 'cfg:lang', 'settings')],
-        [btn(s.btnMode, 'cfg:mode', 'lock')],
-        [btn(s.btnModel, 'cfg:model', 'brush')],
-      ]),
-    });
+  bot.command('config', guard(async (ctx, scope) => {
+    const s = t(scope);
+    const target = targetFromScope(scope);
+    await bot.api.sendMessage(
+      target.chatId,
+      s.configTitle,
+      withReplyTarget(target, {
+        parse_mode: 'HTML' as const,
+        reply_markup: kb([
+          [btn(s.btnLanguage, 'cfg:lang', 'settings')],
+          [btn(s.btnMode, 'cfg:mode', 'lock')],
+          [btn(s.btnModel, 'cfg:model', 'brush')],
+        ]),
+      }),
+    );
   }));
 
-  bot.callbackQuery('cfg:lang', guard(async (ctx, id) => {
+  bot.callbackQuery('cfg:lang', guard(async (ctx, scope) => {
     await ctx.answerCallbackQuery();
-    await sendLanguageChooser(id);
+    await sendLanguageChooser(scope);
   }));
-  bot.callbackQuery('cfg:mode', guard(async (ctx, id) => {
+  bot.callbackQuery('cfg:mode', guard(async (ctx, scope) => {
     await ctx.answerCallbackQuery();
-    await showModeChooser(id);
+    await showModeChooser(scope);
   }));
-  bot.callbackQuery('cfg:model', guard(async (ctx, id) => {
+  bot.callbackQuery('cfg:model', guard(async (ctx, scope) => {
     await ctx.answerCallbackQuery();
-    await showModelChooser(id);
+    await showModelChooser(scope);
   }));
 
   // --- Смена проекта (рабочей папки) ---
-  const applyProjectDir = async (id: number, dir: string, raw: string) => {
+  const applyProjectDir = async (scope: ChatScope, dir: string, raw: string) => {
+    const target = targetFromScope(scope);
     if (!isDir(dir)) {
-      await sendHtml(bot.api, id, t(id).cdNotDir(raw));
+      await sendHtml(bot.api, target, t(scope).cdNotDir(raw));
       return;
     }
-    await sessions.setProjectDir(id, dir);
-    await sendHtml(bot.api, id, t(id).projectSet(dir));
+    await sessions.setProjectDir(scope, dir);
+    await sendHtml(bot.api, target, t(scope).projectSet(dir));
   };
 
-  bot.command('cd', guard(async (ctx, id) => {
+  bot.command('cd', guard(async (ctx, scope) => {
     const arg = ctx.match?.toString().trim();
     if (arg) {
-      await applyProjectDir(id, expandPath(arg), arg);
+      await applyProjectDir(scope, expandPath(arg), arg);
       return;
     }
     // без аргумента — список недавних проектов (по cwd последних сессий + конфиг)
@@ -215,36 +249,41 @@ export function buildBot(config: Config): BuiltBot {
       if (dirs.length >= 12) break;
     }
     if (dirs.length === 0) {
-      await sendHtml(bot.api, id, t(id).noProjects);
+      await sendHtml(bot.api, targetFromScope(scope), t(scope).noProjects);
       return;
     }
-    cdCandidates.set(id, dirs);
+    cdCandidates.set(scope.key, dirs);
     const rows: PremiumButton[][] = dirs.map((d, i) => [
       btn(`${baseName(d)}  —  ${d}`.slice(0, 60), `cd:${i}`, 'file'),
     ]);
-    await bot.api.sendMessage(id, t(id).chooseProject, { parse_mode: 'HTML', reply_markup: kb(rows) });
+    const target = targetFromScope(scope);
+    await bot.api.sendMessage(
+      target.chatId,
+      t(scope).chooseProject,
+      withReplyTarget(target, { parse_mode: 'HTML' as const, reply_markup: kb(rows) }),
+    );
   }));
 
-  bot.callbackQuery(/^cd:(\d+)$/, guard(async (ctx, id) => {
+  bot.callbackQuery(/^cd:(\d+)$/, guard(async (ctx, scope) => {
     await ctx.answerCallbackQuery();
-    const dir = cdCandidates.get(id)?.[Number(ctx.match![1])];
+    const dir = cdCandidates.get(scope.key)?.[Number(ctx.match![1])];
     if (!dir) return;
     await ctx.editMessageReplyMarkup().catch(() => undefined);
-    await applyProjectDir(id, dir, dir);
+    await applyProjectDir(scope, dir, dir);
   }));
 
   // --- Сброс / новая сессия ---
-  bot.command(['new', 'clear'], guard(async (ctx, id) => {
-    await sessions.reset(id);
-    await sendHtml(bot.api, id, t(id).newSession);
+  bot.command(['new', 'clear'], guard(async (ctx, scope) => {
+    await sessions.reset(scope);
+    await sendHtml(bot.api, targetFromScope(scope), t(scope).newSession);
   }));
 
   // --- Выбор прошлой сессии (по всем проектам, свежие сверху) ---
-  bot.command(['resume', 'sessions'], guard(async (ctx, id) => {
+  bot.command(['resume', 'sessions'], guard(async (ctx, scope) => {
     const list = await listSessions({ limit: 15 });
     list.sort((a, b) => b.lastModified - a.lastModified);
     if (list.length === 0) {
-      await sendHtml(bot.api, id, t(id).noSessions);
+      await sendHtml(bot.api, targetFromScope(scope), t(scope).noSessions);
       return;
     }
     const rows: PremiumButton[][] = list.map((s) => {
@@ -254,147 +293,163 @@ export function buildBot(config: Config): BuiltBot {
       const label = `${fmtDate(s.lastModified)} · ${baseName(s.cwd)} · ${title}`;
       return [btn(label.slice(0, 60), `resume:${s.sessionId}`, 'file')];
     });
-    await bot.api.sendMessage(id, t(id).sessionsHeader(list.length), {
-      parse_mode: 'HTML',
-      reply_markup: kb(rows),
-    });
+    const target = targetFromScope(scope);
+    await bot.api.sendMessage(
+      target.chatId,
+      t(scope).sessionsHeader(list.length),
+      withReplyTarget(target, {
+        parse_mode: 'HTML' as const,
+        reply_markup: kb(rows),
+      }),
+    );
   }));
 
   // --- Статус ---
-  bot.command('status', guard(async (ctx, id) => {
-    const s = sessions.get(id);
-    const tr = t(id);
-    await sendHtml(bot.api, id, tr.status(s.sessionId ?? tr.notInit, s.model, s.mode, s.cwd));
+  bot.command('status', guard(async (ctx, scope) => {
+    const s = sessions.get(scope);
+    const tr = t(scope);
+    await sendHtml(
+      bot.api,
+      targetFromScope(scope),
+      tr.status(s.sessionId ?? tr.notInit, s.model, s.mode, s.cwd),
+    );
   }));
 
   // --- Режим разрешений ---
-  bot.command('mode', guard(async (ctx, id) => {
+  bot.command('mode', guard(async (ctx, scope) => {
     const arg = ctx.match?.toString().trim();
     if (arg) {
       if (!PERMISSION_MODES.includes(arg as PermissionMode)) {
-        await sendHtml(bot.api, id, t(id).unknownMode(PERMISSION_MODES.join(', ')));
+        await sendHtml(
+          bot.api,
+          targetFromScope(scope),
+          t(scope).unknownMode(PERMISSION_MODES.join(', ')),
+        );
         return;
       }
-      await sessions.setMode(id, arg as PermissionMode);
-      await sendHtml(bot.api, id, t(id).modeSet(arg));
+      await sessions.setMode(scope, arg as PermissionMode);
+      await sendHtml(bot.api, targetFromScope(scope), t(scope).modeSet(arg));
       return;
     }
-    await showModeChooser(id);
+    await showModeChooser(scope);
   }));
 
   // --- Модель ---
-  bot.command('model', guard(async (ctx, id) => {
+  bot.command('model', guard(async (ctx, scope) => {
     const arg = ctx.match?.toString().trim();
     if (arg) {
-      await sessions.get(id).setModel(arg);
-      await sendHtml(bot.api, id, t(id).modelSet(arg));
+      await sessions.get(scope).setModel(arg);
+      await sendHtml(bot.api, targetFromScope(scope), t(scope).modelSet(arg));
       return;
     }
-    await showModelChooser(id);
+    await showModelChooser(scope);
   }));
 
-  bot.command('models', guard(async (ctx, id) => {
-    const models = await sessions.get(id).listModels();
+  bot.command('models', guard(async (ctx, scope) => {
+    const models = await sessions.get(scope).listModels();
     const text = models.map((m) => `• ${m.displayName} — ${m.value}`).join('\n');
-    await sendChunked(bot.api, id, text || t(id).modelsUnavailable);
+    await sendChunked(bot.api, targetFromScope(scope), text || t(scope).modelsUnavailable);
   }));
 
   // --- Список нативных слэш-команд Claude ---
-  bot.command('commands', guard(async (ctx, id) => {
-    const cmds = await sessions.get(id).listCommands();
+  bot.command('commands', guard(async (ctx, scope) => {
+    const cmds = await sessions.get(scope).listCommands();
     const text = cmds
       .map((c) => `/${c.name}${c.argumentHint ? ' ' + c.argumentHint : ''} — ${c.description}`)
       .join('\n');
-    await sendChunked(bot.api, id, text || t(id).noCommands);
+    await sendChunked(bot.api, targetFromScope(scope), text || t(scope).noCommands);
   }));
 
-  bot.command('agents', guard(async (ctx, id) => {
-    const agents = await sessions.get(id).listAgents();
+  bot.command('agents', guard(async (ctx, scope) => {
+    const agents = await sessions.get(scope).listAgents();
     const text = agents.map((a) => `• ${a.name} — ${a.description}`).join('\n');
-    await sendChunked(bot.api, id, text || t(id).noAgents);
+    await sendChunked(bot.api, targetFromScope(scope), text || t(scope).noAgents);
   }));
 
-  bot.command('mcp', guard(async (ctx, id) => {
-    const servers = await sessions.get(id).mcpStatus();
+  bot.command('mcp', guard(async (ctx, scope) => {
+    const servers = await sessions.get(scope).mcpStatus();
     const text = servers.map((s) => `• ${s.name}: ${s.status}`).join('\n');
-    await sendChunked(bot.api, id, text || t(id).noMcp);
+    await sendChunked(bot.api, targetFromScope(scope), text || t(scope).noMcp);
   }));
 
   // --- Прерывание ---
-  bot.command('stop', guard(async (ctx, id) => {
-    if (!sessions.has(id)) {
-      await sendHtml(bot.api, id, t(id).noActiveSession);
+  bot.command('stop', guard(async (ctx, scope) => {
+    if (!sessions.has(scope)) {
+      await sendHtml(bot.api, targetFromScope(scope), t(scope).noActiveSession);
       return;
     }
-    await sessions.get(id).interrupt();
-    await sendHtml(bot.api, id, t(id).interrupted);
+    await sessions.get(scope).interrupt();
+    await sendHtml(bot.api, targetFromScope(scope), t(scope).interrupted);
   }));
 
   // --- Callback: возобновление сессии ---
-  bot.callbackQuery(/^resume:(.+)$/, guard(async (ctx, id) => {
+  bot.callbackQuery(/^resume:(.+)$/, guard(async (ctx, scope) => {
     const sessionId = ctx.match![1];
     await ctx.answerCallbackQuery();
     await ctx.editMessageReplyMarkup();
     const info = await getSessionInfo(sessionId).catch(() => undefined);
-    await sessions.reset(id, sessionId, info?.cwd);
-    await sendHtml(bot.api, id, t(id).resumed(info?.cwd));
+    await sessions.reset(scope, sessionId, info?.cwd);
+    await sendHtml(bot.api, targetFromScope(scope), t(scope).resumed(info?.cwd));
   }));
 
   // --- Callback: смена модели ---
-  bot.callbackQuery(/^model:(.+)$/, guard(async (ctx, id) => {
+  bot.callbackQuery(/^model:(.+)$/, guard(async (ctx, scope) => {
     const value = ctx.match![1];
-    await sessions.get(id).setModel(value);
+    await sessions.get(scope).setModel(value);
     await ctx.answerCallbackQuery({ text: value });
-    await ctx.editMessageText(t(id).modelSet(value), { parse_mode: 'HTML' });
+    await ctx.editMessageText(t(scope).modelSet(value), { parse_mode: 'HTML' as const });
   }));
 
   // --- Callback: смена режима ---
-  bot.callbackQuery(/^mode:(.+)$/, guard(async (ctx, id) => {
+  bot.callbackQuery(/^mode:(.+)$/, guard(async (ctx, scope) => {
     const mode = ctx.match![1] as PermissionMode;
-    await sessions.setMode(id, mode);
+    await sessions.setMode(scope, mode);
     await ctx.answerCallbackQuery({ text: mode });
-    await ctx.editMessageText(t(id).modeSet(mode), { parse_mode: 'HTML' });
+    await ctx.editMessageText(t(scope).modeSet(mode), { parse_mode: 'HTML' as const });
   }));
 
   // --- Любой текст (и непойманные слэш-команды) → в Claude ---
-  bot.on('message:text', guard(async (ctx, id) => {
+  bot.on('message:text', guard(async (ctx, scope) => {
     const text = ctx.message?.text;
     if (!text) return;
-    await ctx.api.sendChatAction(id, 'typing');
-    sessions.get(id).send(text);
+    const target = targetFromScope(scope);
+    await ctx.api.sendChatAction(target.chatId, 'typing', withThread(target, {}));
+    sessions.get(scope).send(text);
   }));
 
   // --- Фото → Claude (мультимодально) ---
-  bot.on('message:photo', guard(async (ctx, id) => {
-    const caption = ctx.message?.caption?.trim() || t(id).imagePrompt;
-    await ctx.api.sendChatAction(id, 'typing');
+  bot.on('message:photo', guard(async (ctx, scope) => {
+    const target = targetFromScope(scope);
+    const caption = ctx.message?.caption?.trim() || t(scope).imagePrompt;
+    await ctx.api.sendChatAction(target.chatId, 'typing', withThread(target, {}));
     const data = await downloadBase64(ctx);
-    sessions.get(id).sendContent([
+    sessions.get(scope).sendContent([
       { type: 'text', text: caption },
       { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data } },
     ]);
   }));
 
   // --- Картинка файлом (документом) ---
-  bot.on('message:document', guard(async (ctx, id) => {
+  bot.on('message:document', guard(async (ctx, scope) => {
+    const target = targetFromScope(scope);
     const mime = ctx.message?.document?.mime_type ?? '';
     if (!mime.startsWith('image/')) {
-      await sendHtml(bot.api, id, t(id).notAnImage);
+      await sendHtml(bot.api, target, t(scope).notAnImage);
       return;
     }
-    const caption = ctx.message?.caption?.trim() || t(id).imagePrompt;
-    await ctx.api.sendChatAction(id, 'typing');
+    const caption = ctx.message?.caption?.trim() || t(scope).imagePrompt;
+    await ctx.api.sendChatAction(target.chatId, 'typing', withThread(target, {}));
     const data = await downloadBase64(ctx);
     const media = ALLOWED_IMAGE_MIME.has(mime) ? mime : 'image/jpeg';
-    sessions.get(id).sendContent([
+    sessions.get(scope).sendContent([
       { type: 'text', text: caption },
       { type: 'image', source: { type: 'base64', media_type: media, data } },
     ]);
   }));
 
   // --- Прочие медиа без поддержки контента ---
-  bot.on('message', guard(async (ctx, id) => {
-    await sendHtml(bot.api, id, t(id).mediaFallback);
+  bot.on('message', guard(async (ctx, scope) => {
+    await sendHtml(bot.api, targetFromScope(scope), t(scope).mediaFallback);
   }));
 
   bot.catch((err) => {
