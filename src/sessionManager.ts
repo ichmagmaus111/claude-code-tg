@@ -127,14 +127,23 @@ export class SessionManager {
       },
     };
 
+    // приоритет рабочей папки: явная (resume) > выбранная через /cd > из конфига
+    const effectiveCwd = cwd ?? this.settings.getCwd(chatId);
+
     return new ClaudeSession({
       config: this.config,
       prompter: this.permissions.createPrompter(chatId),
       callbacks,
       resume,
-      cwd,
+      cwd: effectiveCwd,
       mode: this.config.defaultMode,
     });
+  }
+
+  /** Меняет рабочую папку чата (/cd) и стартует свежую сессию в ней. */
+  async setProjectDir(chatId: number, dir: string): Promise<void> {
+    this.settings.setCwd(chatId, dir);
+    await this.reset(chatId);
   }
 
   setMode(chatId: number, mode: PermissionMode): Promise<void> {

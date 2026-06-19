@@ -47,6 +47,19 @@ export interface Strings {
   notAnImage: string;
   mediaFallback: string;
   imagePrompt: string;
+  // проекты (/cd)
+  chooseProject: string;
+  noProjects: string;
+  cdNotDir: (path: string) => string;
+  projectSet: (path: string) => string;
+  // plan-mode
+  planTitle: string;
+  planFileCaption: string;
+  btnApprovePlan: string;
+  btnRejectPlan: string;
+  planApproved: string;
+  planRejected: string;
+  planDenyReason: string;
   // разрешения
   permTitle: string;
   permTool: (name: string) => string;
@@ -77,6 +90,7 @@ const RU: Strings = {
 
 <b>${tg('settings')} Управление ботом:</b>
 /config — настройки (язык, режим, модель)
+/cd [путь] — сменить проект (рабочую папку)
 /new, /clear — новая сессия (сброс контекста)
 /resume, /sessions — выбрать прошлую сессию
 /status — текущая сессия, модель, режим
@@ -145,6 +159,17 @@ auto — модель сама решает
   notAnImage: `${tg('info')} Это не картинка. Я понимаю текст, команды и изображения.`,
   mediaFallback: `${tg('info')} Я понимаю текст, команды, фото и изображения. (Голосовые пока не поддерживаются.)`,
   imagePrompt: 'Посмотри на это изображение.',
+  chooseProject: `${tg('file')} Выбери проект (или укажи путь: /cd путь):`,
+  noProjects: `${tg('file')} Недавних проектов нет. Укажи путь: /cd путь`,
+  cdNotDir: (path) => `${tg('cross')} Не папка или не существует: ${escapeHtml(path)}`,
+  projectSet: (path) => `${tg('file')} Проект: ${escapeHtml(path)}. Создаю новую сессию.`,
+  planTitle: `${tg('pencil')} Claude предлагает план:`,
+  planFileCaption: 'План (Markdown)',
+  btnApprovePlan: 'Принять план',
+  btnRejectPlan: 'Отклонить',
+  planApproved: `${tg('check')} План принят — выполняю (режим acceptEdits).`,
+  planRejected: `${tg('cross')} План отклонён. Остаёмся в режиме планирования.`,
+  planDenyReason: 'Пользователь отклонил план.',
   permTitle: 'Запрос разрешения',
   permTool: (name) => `Инструмент: ${escapeHtml(name)}`,
   btnAllow: 'Разрешить',
@@ -163,6 +188,7 @@ auto — модель сама решает
   turnError: (subtype) => `${tg('cross')} Ход завершён с ошибкой: ${escapeHtml(subtype)}`,
   cmdMenu: [
     { command: 'config', description: 'Настройки' },
+    { command: 'cd', description: 'Сменить проект' },
     { command: 'new', description: 'Новая сессия' },
     { command: 'resume', description: 'Выбрать прошлую сессию' },
     { command: 'status', description: 'Текущая сессия и настройки' },
@@ -182,6 +208,7 @@ Just type a message — it goes to Claude. You can send ${tg('media')} photos an
 
 <b>${tg('settings')} Bot controls:</b>
 /config — settings (language, mode, model)
+/cd [path] — switch project (working dir)
 /new, /clear — new session (reset context)
 /resume, /sessions — pick a past session
 /status — current session, model, mode
@@ -250,6 +277,17 @@ Write/Bash requests in default/plan modes arrive as ${tg('check')}/${tg('cross')
   notAnImage: `${tg('info')} That's not an image. I understand text, commands and images.`,
   mediaFallback: `${tg('info')} I understand text, commands, photos and images. (Voice messages are not supported yet.)`,
   imagePrompt: 'Look at this image.',
+  chooseProject: `${tg('file')} Choose a project (or set a path: /cd path):`,
+  noProjects: `${tg('file')} No recent projects. Set a path: /cd path`,
+  cdNotDir: (path) => `${tg('cross')} Not a directory or does not exist: ${escapeHtml(path)}`,
+  projectSet: (path) => `${tg('file')} Project: ${escapeHtml(path)}. Starting a new session.`,
+  planTitle: `${tg('pencil')} Claude proposes a plan:`,
+  planFileCaption: 'Plan (Markdown)',
+  btnApprovePlan: 'Approve plan',
+  btnRejectPlan: 'Reject',
+  planApproved: `${tg('check')} Plan approved - executing (acceptEdits mode).`,
+  planRejected: `${tg('cross')} Plan rejected. Staying in plan mode.`,
+  planDenyReason: 'The user rejected the plan.',
   permTitle: 'Permission request',
   permTool: (name) => `Tool: ${escapeHtml(name)}`,
   btnAllow: 'Allow',
@@ -268,6 +306,7 @@ Write/Bash requests in default/plan modes arrive as ${tg('check')}/${tg('cross')
   turnError: (subtype) => `${tg('cross')} Turn finished with error: ${escapeHtml(subtype)}`,
   cmdMenu: [
     { command: 'config', description: 'Settings' },
+    { command: 'cd', description: 'Switch project' },
     { command: 'new', description: 'New session' },
     { command: 'resume', description: 'Pick a past session' },
     { command: 'status', description: 'Current session and settings' },

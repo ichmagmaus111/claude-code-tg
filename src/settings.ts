@@ -6,6 +6,7 @@ const STORE_FILE = join(process.cwd(), '.claude-bot-settings.json');
 
 interface ChatSettings {
   lang?: Lang;
+  cwd?: string;
 }
 
 /** Per-chat настройки бота (язык и т.п.) с персистом на диск. */
@@ -30,6 +31,18 @@ export class SettingsStore {
     if (!LANGS.includes(lang)) return;
     const s = this.byChat.get(chatId) ?? {};
     s.lang = lang;
+    this.byChat.set(chatId, s);
+    this.save();
+  }
+
+  /** Выбранная рабочая папка проекта для чата (если задана через /cd). */
+  getCwd(chatId: number): string | undefined {
+    return this.byChat.get(chatId)?.cwd;
+  }
+
+  setCwd(chatId: number, cwd: string): void {
+    const s = this.byChat.get(chatId) ?? {};
+    s.cwd = cwd;
     this.byChat.set(chatId, s);
     this.save();
   }

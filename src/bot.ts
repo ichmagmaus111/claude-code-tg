@@ -1,4 +1,8 @@
 import { Bot, type Context } from 'grammy';
+import { autoRetry } from '@grammyjs/auto-retry';
+import { statSync } from 'node:fs';
+import { resolve as resolvePath } from 'node:path';
+import { homedir } from 'node:os';
 import {
   listSessions,
   getSessionInfo,
@@ -25,6 +29,20 @@ function baseName(path?: string): string {
   return parts[parts.length - 1] ?? path;
 }
 
+function expandPath(p: string): string {
+  if (p === '~') return homedir();
+  if (p.startsWith('~/')) return resolvePath(homedir(), p.slice(2));
+  return resolvePath(p);
+}
+
+function isDir(p: string): boolean {
+  try {
+    return statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 // Типы изображений, которые принимает Claude.
 const ALLOWED_IMAGE_MIME = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 
@@ -35,9 +53,13 @@ export interface BuiltBot {
 
 export function buildBot(config: Config): BuiltBot {
   const bot = new Bot(config.botToken);
+  // авто-ретраи исходящих вызовов API (429 rate limit, временные 5xx)
+  bot.api.config.use(autoRetry({ maxRetryAttempts: 3, maxDelaySeconds: 30 }));
   const settings = new SettingsStore();
-  const permissions = new PermissionManager(bot, settings);
+  const permissions = new PermissionManager(bot, settings, config.botToken);
   const sessions = new SessionManager(bot, config, permissions, settings);
+  // кандидаты для /cd: chatId -> список путей (для коротких callback_data)
+  const cdCandidates = new Map<number, string[]>();
 
   const chatId = (ctx: Context): number | undefined => ctx.chat?.id ?? ctx.from?.id;
   /** Строки на языке чата. */
@@ -163,6 +185,52 @@ export function buildBot(config: Config): BuiltBot {
   bot.callbackQuery('cfg:model', guard(async (ctx, id) => {
     await ctx.answerCallbackQuery();
     await showModelChooser(id);
+  }));
+
+  // --- Смена проекта (рабочей папки) ---
+  const applyProjectDir = async (id: number, dir: string, raw: string) => {
+    if (!isDir(dir)) {
+      await sendHtml(bot.api, id, t(id).cdNotDir(raw));
+      return;
+    }
+    await sessions.setProjectDir(id, dir);
+    await sendHtml(bot.api, id, t(id).projectSet(dir));
+  };
+
+  bot.command('cd', guard(async (ctx, id) => {
+    const arg = ctx.match?.toString().trim();
+    if (arg) {
+      await applyProjectDir(id, expandPath(arg), arg);
+      return;
+    }
+    // без аргумента — список недавних проектов (по cwd последних сессий + конфиг)
+    const list = await listSessions({ limit: 50 });
+    const dirs: string[] = [];
+    const seen = new Set<string>();
+    for (const d of [config.workingDir, ...list.map((s) => s.cwd)]) {
+      if (d && !seen.has(d) && isDir(d)) {
+        seen.add(d);
+        dirs.push(d);
+      }
+      if (dirs.length >= 12) break;
+    }
+    if (dirs.length === 0) {
+      await sendHtml(bot.api, id, t(id).noProjects);
+      return;
+    }
+    cdCandidates.set(id, dirs);
+    const rows: PremiumButton[][] = dirs.map((d, i) => [
+      btn(`${baseName(d)}  —  ${d}`.slice(0, 60), `cd:${i}`, 'file'),
+    ]);
+    await bot.api.sendMessage(id, t(id).chooseProject, { parse_mode: 'HTML', reply_markup: kb(rows) });
+  }));
+
+  bot.callbackQuery(/^cd:(\d+)$/, guard(async (ctx, id) => {
+    await ctx.answerCallbackQuery();
+    const dir = cdCandidates.get(id)?.[Number(ctx.match![1])];
+    if (!dir) return;
+    await ctx.editMessageReplyMarkup().catch(() => undefined);
+    await applyProjectDir(id, dir, dir);
   }));
 
   // --- Сброс / новая сессия ---
