@@ -47,14 +47,15 @@ async function main(): Promise<void> {
   const config = loadConfig();
   const { bot, sessions } = buildBot(config);
 
-  await registerCommandMenu(bot).catch((err) => {
-    console.error('Не удалось зарегистрировать меню команд:', err);
-  });
-
+  let shuttingDown = false;
   const shutdown = async (signal: string) => {
+    shuttingDown = true;
     console.log(`\nПолучен ${signal}, завершаю…`);
     await sessions.closeAll().catch(() => {});
-    await bot.stop();
+    await Promise.race([
+      bot.stop().catch(() => {}),
+      new Promise((resolve) => setTimeout(resolve, 2000)),
+    ]);
     process.exit(0);
   };
   process.once('SIGINT', () => void shutdown('SIGINT'));
@@ -66,12 +67,17 @@ async function main(): Promise<void> {
   console.log(`   Разрешённых пользователей: ${config.allowedUserIds.size}`);
   console.log(`   Режим по умолчанию: ${config.defaultMode}`);
 
+  void registerCommandMenu(bot).catch((err) => {
+    console.error('Не удалось зарегистрировать меню команд:', err);
+  });
+
   try {
     await bot.start({
       drop_pending_updates: true,
       onStart: (info) => console.log(`✅ Бот @${info.username} запущен.`),
     });
   } catch (err) {
+    if (shuttingDown) return;
     if (err instanceof GrammyError && err.error_code === 409) {
       console.error(
         'Конфликт 409: этот токен уже опрашивает другой инстанс бота. ' +
