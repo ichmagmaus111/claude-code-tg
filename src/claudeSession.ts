@@ -26,6 +26,7 @@ export type UserContentBlock =
 export type UserContent = string | UserContentBlock[];
 
 export interface SessionCallbacks {
+  onUserMessage?(): Promise<void> | void;
   onText(text: string): Promise<void>;
   /** Частичный (накопленный) текст ответа во время генерации — для стриминга черновика. */
   onTextDelta?(accumulated: string): Promise<void> | void;
@@ -193,6 +194,7 @@ export class ClaudeSession {
   /** Отправляет произвольный контент: текст и/или картинки (мультимодально). */
   sendContent(content: UserContent): void {
     this.start();
+    void this.opts.callbacks.onUserMessage?.();
     const userMessage: SDKUserMessage = {
       type: 'user',
       parent_tool_use_id: null,
