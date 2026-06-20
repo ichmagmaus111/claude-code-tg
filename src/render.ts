@@ -145,6 +145,34 @@ export async function sendRichDraft(
   }
 }
 
+/**
+ * Показывает эфемерный rich draft с индикатором thinking до первого text delta.
+ * `<tg-thinking>` поддерживается только в sendRichMessageDraft, поэтому это
+ * best-effort превью и не сохраняется в истории чата.
+ */
+export async function sendThinkingDraft(
+  token: string,
+  target: TelegramTarget,
+  draftId: number,
+): Promise<boolean> {
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/sendRichMessageDraft`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        ...richDraftPayload(target),
+        draft_id: draftId,
+        rich_message: { html: '<tg-thinking>Claude is thinking…</tg-thinking>' },
+      }),
+      signal: AbortSignal.timeout(5000),
+    });
+    const data = (await res.json()) as { ok?: boolean };
+    return data.ok === true;
+  } catch {
+    return false;
+  }
+}
+
 /** Короткое человекочитаемое описание вызова инструмента для уведомления в чат. */
 export function summarizeToolUse(name: string, input: Record<string, unknown>): string {
   const get = (k: string) => (typeof input[k] === 'string' ? (input[k] as string) : undefined);

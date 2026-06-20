@@ -10,6 +10,7 @@ import {
   sendHtml,
   sendRichMarkdown,
   sendRichDraft,
+  sendThinkingDraft,
   RICH_MAX,
   summarizeToolUse,
 } from './render.js';
@@ -77,6 +78,9 @@ export class SessionManager {
     const DRAFT_THROTTLE_MS = 800;
 
     const callbacks: SessionCallbacks = {
+      onUserMessage: () => {
+        void sendThinkingDraft(token, target(), draftId);
+      },
       onTextDelta: (accumulated) => {
         // Троттлим и шлём fire-and-forget — не блокируем поток сообщений.
         const now = Date.now();
